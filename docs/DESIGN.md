@@ -84,36 +84,61 @@ self-hosted runners on **one machine**, quickly.
 
 ```
 src/
-  shared/            types and the IPC contract, used by all three processes
+  shared/              types and the IPC contract, used by all three processes
   main/
-    main.ts          app lifecycle, window, tray
-    ipc.ts           IPC handlers
-    db.ts            JSON DB
-    secrets.ts       safeStorage wrapper
-    github.ts        Octokit per connection
+    main.ts            app lifecycle, window, tray, quit confirmation
+    ipc.ts             IPC handlers
+    db.ts              JSON DB
+    secrets.ts         safeStorage wrapper
+    github.ts          Octokit per connection
+    login.ts           launch at login (Squirrel Update.exe / XDG autostart)
     runner/
-      download.ts    release lookup, SHA256, cache
-      install.ts     extract, config, .env hook, cleanup scripts
-      supervisor.ts  child process + backoff
-      service/       windows.ts, linux.ts (OS adapters)
-      status.ts      local + GitHub merge, drift detection
-      logs.ts        _diag tail + retention
-      manager.ts     orchestration, bulk ops
-  preload/preload.ts contextBridge exposing the typed API
-  renderer/          React app
+      exec.ts          spawn helpers, tree kill, graceful interrupt, elevated batches
+      download.ts      release lookup, SHA256, cache
+      layout.ts        runner folder: configure/remove steps, .env + cleanup hook, Clean now
+      service.ts       Windows sc / Linux systemd + svc.sh
+      supervisor.ts    child process, output parsing, crash backoff
+      processes.ts     find Runner.Listener processes left by a previous session
+      logs.ts          _diag tail + retention
+      manager.ts       orchestration, bulk ops, polling, drift detection
+  preload/preload.ts   contextBridge exposing the typed API
+  renderer/            React app
 ```
 
-## Phases
+## Implementation notes
 
-1. Foundation — TS, React, Tailwind, shadcn, process split, typed IPC, JSON DB,
-   Settings (root path), window/tray skeleton.
-2. Connections — PAT storage, validation, list repos/orgs/runner groups.
-3. Create + run (child mode) — download/verify/extract/config, cleanup hook, bulk create,
-   presets, start/stop/restart.
-4. Status + logs — polling merge, runners table, bulk actions, log viewer, retention,
-   crash backoff, notifications.
-5. Service mode — Windows/Linux adapters, elevation, mode switching.
-6. Maintenance — delete flow, pending removal, Broken/Repair/Forget, other runners,
-   label edit, Clean now.
-7. Polish + release — shortcuts, command palette, launch at login, autostart, quit
-   dialog, CI workflow, makers.
+Findings from testing against real runners (v2.337.0) on Windows:
+
+- **Graceful stop.** Killing a runner leaves its GitHub session behind; the next start
+  retries "A session for this runner already exists" for ~2 minutes. Child runners are
+  therefore stopped with Ctrl+Break sent to their hidden console (a small PowerShell
+  helper attaches to it), or SIGINT to the process group on Linux; the tree is killed only
+  if the runner has not exited after 30s. Ctrl+C is not used because an inherited
+  "ignore Ctrl+C" flag can disable it.
+- **`run.cmd` by absolute path.** With `NoDefaultCurrentDirectoryInExePath` set, a bare
+  `run.cmd` resolves through PATH (nvm ships one).
+- **Secrets never on the command line.** The registration/removal token and the Windows
+  service password are passed as `ACTIONS_RUNNER_INPUT_*` environment variables.
+  Elevated steps run from one temporary PowerShell / bash script (deleted afterwards), so
+  a batch of N services costs one UAC / polkit prompt.
+- **Managed `.env` keys** (other lines are kept; rewritten at app start):
+  - `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` → the cleanup hook.
+  - `PSExecutionPolicyPreference=RemoteSigned` (Windows, with cleanup on): the runner runs
+    `.ps1` hooks via `powershell -command`, which the default Restricted policy blocks.
+  - `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` (Settings → Runner environment; default on
+    for Thai systems): under th-TH the runner's Worker crashes in
+    `SecretMasker`/`PowerShellPreAmpersandEscape` with ArgumentOutOfRangeException before
+    any step runs. Jobs inherit the variable.
+- **Cleanup** empties `GITHUB_WORKSPACE` and `RUNNER_TEMP` (plus `_actions` / `_tool` when
+  enabled) and keeps `_work/_PipelineMapping` and the per-repo folders.
+- **Busy detection** comes from the listener output ("Running job: …", "Job … completed
+  with result") and from the GitHub API.
+- Runners found running at startup (e.g. after the app was killed) are adopted and can
+  be stopped, but their output is not available.
+
+## Not verified yet
+
+- Linux (child, systemd service, pkexec) — code paths exist but were not run.
+- Windows service with a user account (only NETWORK SERVICE was tested).
+- Organization targets and runner groups (tested with a repository only).
+- Quit confirmation while a child runner is busy, and launch at login (packaged app).
