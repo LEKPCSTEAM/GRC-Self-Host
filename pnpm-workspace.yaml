@@ -1,0 +1,30 @@
+# Electron Forge requires a flat node_modules layout when using pnpm
+nodeLinker: hoisted
+
+# Pin exact versions when adding dependencies (no ^ or ~)
+saveExact: true
+
+# Fail install if Node/pnpm versions don't satisfy "engines"
+engineStrict: true
+
+minimumReleaseAgeExclude:
+  - '@electron-forge/cli@8.0.1'
+  - '@electron-forge/core-utils@8.0.1'
+  - '@electron-forge/core@8.0.1'
+  - '@electron-forge/maker-base@8.0.1'
+  - '@electron-forge/maker-deb@8.0.1'
+  - '@electron-forge/maker-rpm@8.0.1'
+  - '@electron-forge/maker-squirrel@8.0.1'
+  - '@electron-forge/maker-zip@8.0.1'
+  - '@electron-forge/multi-logger@8.0.1'
+  - '@electron-forge/plugin-auto-unpack-natives@8.0.1'
+  - '@electron-forge/plugin-base@8.0.1'
+  - '@electron-forge/plugin-fuses@8.0.1'
+  - '@electron-forge/plugin-vite@8.0.1'
+  - '@electron-forge/publisher-base@8.0.1'
+  - '@electron-forge/shared-types@8.0.1'
+  - '@electron-forge/tracer@8.0.1'
+  - electron@44.5.0
+
+allowBuilds:
+  electron-winstaller: true
