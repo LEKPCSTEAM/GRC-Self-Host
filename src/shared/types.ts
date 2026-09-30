@@ -3,12 +3,15 @@ export interface Settings {
   rootDir: string;
   diagRetentionDays: number;
   notifications: boolean;
+  quietHours?: { start: string; end: string };
   launchAtLogin: boolean;
   /**
    * Run runners with DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1. The runner's worker
    * crashes under some cultures (e.g. th-TH) while masking secrets.
    */
   invariantCulture: boolean;
+  language?: 'en' | 'th';
+  theme?: 'system' | 'light' | 'dark';
 }
 
 export interface AppInfo {
@@ -57,6 +60,11 @@ export interface CleanupOptions {
   tool: boolean;
 }
 
+export interface BulkOptionsPatch {
+  autostart?: boolean;
+  cleanup?: Partial<CleanupOptions>;
+}
+
 export interface RunnerRecord {
   id: string;
   name: string;
@@ -95,6 +103,25 @@ export interface Preset {
   serviceAccount?: string;
 }
 
+export interface RestorePreview {
+  id: string;
+  file: string;
+  settingsChanged: boolean;
+  newConnections: number;
+  newPresets: number;
+  newRunners: number;
+  newWatchedTargets: number;
+  conflicts: string[];
+  warnings: string[];
+}
+
+export interface RestoreResult {
+  connections: number;
+  presets: number;
+  runners: number;
+  watchedTargets: number;
+}
+
 export type LocalState =
   | 'stopped'
   | 'starting'
@@ -110,14 +137,20 @@ export interface RunnerStatus {
   /** Description of the operation in progress, e.g. "Downloading 45%". */
   op?: string;
   github: GithubState;
+  /** Last attempted and successful GitHub runner poll. */
+  githubCheckedAt?: string;
+  githubSyncedAt?: string;
+  githubError?: string;
   /** Running a job, from local output or GitHub. */
   busy: boolean;
   jobName?: string;
   /** Why the runner is considered broken, if it is. */
   broken?: string;
   lastError?: string;
+  creationFailed?: boolean;
   /** Child process started outside this app session (after a crash or restart). */
   orphan?: boolean;
+  stopAfterJob?: boolean;
 }
 
 export interface RunnerView extends RunnerRecord {
@@ -134,13 +167,149 @@ export interface ForeignRunner {
   status: string;
   busy: boolean;
   labels: string[];
+  readOnly?: boolean;
+}
+
+export interface WatchTarget {
+  id: string;
+  connectionId: string;
+  target: Target;
+  checkedAt?: string;
+  error?: string;
 }
 
 export interface Snapshot {
   runners: RunnerView[];
   foreign: ForeignRunner[];
+  watched: WatchTarget[];
+  operations: BatchOperation[];
   /** Child runners are busy and the user asked to quit after they finish. */
   quitPending: boolean;
+}
+
+export interface BatchOperation {
+  id: string;
+  action: string;
+  startedAt: string;
+  finishedAt?: string;
+  items: {
+    id: string;
+    name: string;
+    state: 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped';
+    error?: string;
+  }[];
+}
+
+export interface JournalEvent {
+  id: string;
+  at: string;
+  type: 'command' | 'state';
+  action: string;
+  runnerId: string;
+  runnerName: string;
+  outcome: string;
+  error?: string;
+}
+
+export interface VersionReport {
+  latest: string;
+  checkedAt: string;
+  runners: {
+    id: string;
+    installed?: string;
+    updateIssue?: string;
+  }[];
+}
+
+export interface DiskReport {
+  checkedAt: string;
+  cacheBytes: number;
+  totalBytes: number;
+  runners: {
+    id: string;
+    workBytes: number;
+    diagBytes: number;
+    cleanBytes: number;
+    cleanPaths: { path: string; bytes: number }[];
+    omittedPaths: number;
+  }[];
+}
+
+export interface SupportPreview {
+  id: string;
+  days: number;
+  runnerCount: number;
+  files: { runner: string; file: string; bytes: number }[];
+  sample: string;
+  truncated: boolean;
+}
+
+export interface AppReleaseInfo {
+  current: string;
+  latest: string;
+  title: string;
+  notes: string;
+  checkedAt: string;
+  available: boolean;
+}
+
+export interface RunnerJob {
+  id: number;
+  name: string;
+  status: string;
+  conclusion?: string;
+  startedAt?: string;
+  completedAt?: string;
+  workflow?: string;
+}
+
+export interface JobReport {
+  checkedAt: string;
+  jobs: RunnerJob[];
+  scannedRuns: number;
+  message?: string;
+}
+
+export interface MaintenanceTask {
+  id: string;
+  createdAt: string;
+  runAt: string;
+  action: 'clean' | 'restart';
+  runnerIds: string[];
+  skipBusy: boolean;
+  state: 'scheduled' | 'running' | 'completed' | 'cancelled';
+  finishedAt?: string;
+  results?: BulkResult[];
+  error?: string;
+}
+
+export interface MultiTargetPreview {
+  targets: {
+    target: Target;
+    runners: { name: string; path: string }[];
+    checks: PreflightCheck[];
+    visibility?: 'public' | 'private' | 'unknown';
+  }[];
+  total: number;
+}
+
+export interface MultiTargetResult {
+  target: Target;
+  ids: string[];
+  error?: string;
+}
+
+export interface ImportPreview {
+  id: string;
+  dir: string;
+  name: string;
+  githubId: number;
+  version?: string;
+  mode: RunnerMode;
+  local: string;
+  github: string;
+  labels: string[];
+  checks: PreflightCheck[];
 }
 
 export interface CreateRequest {
@@ -156,6 +325,25 @@ export interface CreateRequest {
   serviceAccount?: string;
   /** Never persisted. */
   servicePassword?: string;
+  /** User acknowledged the public or unverified repository warning. */
+  acknowledgePublicRisk?: boolean;
+  /** Names shown in the last preview; abort if allocation changed meanwhile. */
+  expectedNames?: string[];
+}
+
+export interface CreatePreview {
+  runners: { name: string; path: string }[];
+  target: Target;
+  mode: RunnerMode;
+  labels: string[];
+  requiresAdmin: boolean;
+  collisions: string[];
+}
+
+export interface PreflightCheck {
+  name: string;
+  status: 'pass' | 'fail' | 'unknown';
+  message: string;
 }
 
 export interface LogChunk {
@@ -173,5 +361,6 @@ export type BulkAction = 'start' | 'stop' | 'restart' | 'clean';
 export interface BulkResult {
   id: string;
   ok: boolean;
+  skipped?: boolean;
   error?: string;
 }

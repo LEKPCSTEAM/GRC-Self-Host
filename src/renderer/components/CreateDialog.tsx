@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Loader2, Save } from 'lucide-react';
+import { Loader2, Save, Star } from 'lucide-react';
 import { toast } from 'sonner';
 import type {
   Preset,
@@ -8,8 +8,10 @@ import type {
   TargetOption,
 } from '../../shared/types';
 import { api, call } from '@/lib/api';
+import { tr } from '@/lib/i18n';
 import { splitList, targetKey } from '@/lib/format';
 import { useAppInfo, useConnections, usePresets } from '@/lib/hooks';
+import { useConfirm } from '@/components/confirm';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -34,6 +36,43 @@ export type Form = Omit<Preset, 'id' | 'name'>;
 
 /** Matches the labels the main process builds for organization options. */
 const ORG_SUFFIX = ' (organization)';
+const RECENT_CREATE_KEY = 'grc:recent-create';
+const TARGET_CHOICES_KEY = 'grc:target-choices';
+
+interface TargetChoice {
+  connectionId: string;
+  target: Target;
+}
+interface TargetChoices {
+  favorites: TargetChoice[];
+  recent: TargetChoice[];
+}
+function choiceKey(choice: TargetChoice): string {
+  return `${choice.connectionId}|${choice.target.kind}|${targetKey(choice.target).toLowerCase()}`;
+}
+function readChoices(): TargetChoices {
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem(TARGET_CHOICES_KEY) ?? '{}',
+    ) as Partial<TargetChoices>;
+    const valid = (choice: TargetChoice) =>
+      choice &&
+      typeof choice.connectionId === 'string' &&
+      choice.target &&
+      typeof choice.target.owner === 'string' &&
+      (choice.target.kind === 'org' ||
+        (choice.target.kind === 'repo' &&
+          typeof choice.target.repo === 'string'));
+    return {
+      favorites: Array.isArray(saved.favorites)
+        ? saved.favorites.filter(valid)
+        : [],
+      recent: Array.isArray(saved.recent) ? saved.recent.filter(valid) : [],
+    };
+  } catch {
+    return { favorites: [], recent: [] };
+  }
+}
 
 function targetText(t: Target): string {
   if (!t.owner) return '';
@@ -68,6 +107,30 @@ function defaultForm(hostname: string, connectionId: string): Form {
     autostart: true,
     cleanup: { enabled: true, actions: false, tool: false },
   };
+}
+
+function recentForm(hostname: string, connectionId: string): Form {
+  const base = defaultForm(hostname, connectionId);
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem(RECENT_CREATE_KEY) ?? '{}',
+    ) as Partial<Form>;
+    if (typeof saved.connectionId === 'string')
+      base.connectionId = saved.connectionId;
+    if (
+      saved.target &&
+      typeof saved.target.owner === 'string' &&
+      (saved.target.kind === 'org' ||
+        (saved.target.kind === 'repo' && typeof saved.target.repo === 'string'))
+    )
+      base.target = saved.target;
+    if (typeof saved.prefix === 'string') base.prefix = saved.prefix;
+    if (saved.mode === 'child' || saved.mode === 'service')
+      base.mode = saved.mode;
+  } catch {
+    // Ignore stale local preferences.
+  }
+  return base;
 }
 
 function Field({
@@ -121,6 +184,7 @@ export function CreateDialog({
   initial?: Form;
 }) {
   const info = useAppInfo();
+  const confirm = useConfirm();
   const [connections, reloadConnections] = useConnections();
   const [presets, reloadPresets] = usePresets();
   const [form, setForm] = useState<Form | null>(null);
@@ -131,13 +195,22 @@ export function CreateDialog({
   const [password, setPassword] = useState('');
   const [presetName, setPresetName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [choices, setChoices] = useState(readChoices);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TARGET_CHOICES_KEY, JSON.stringify(choices));
+    } catch {
+      /* Optional preferences. */
+    }
+  }, [choices]);
 
   const isWin = info?.platform === 'win32';
 
   // Reset whenever the dialog opens.
   useEffect(() => {
     if (!open || !info) return;
-    const f = initial ?? defaultForm(info.hostname, connections[0]?.id ?? '');
+    const f = initial ?? recentForm(info.hostname, connections[0]?.id ?? '');
     setForm(f);
     setLabelsText(f.labels.join(', '));
     setPassword('');
@@ -152,7 +225,11 @@ export function CreateDialog({
 
   // Pick the first connection once the list arrives.
   useEffect(() => {
-    if (form && !form.connectionId && connections[0])
+    if (
+      form &&
+      connections[0] &&
+      !connections.some((c) => c.id === form.connectionId)
+    )
       set({ connectionId: connections[0].id });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connections, form?.connectionId]);
@@ -205,8 +282,126 @@ export function CreateDialog({
   const create = async () => {
     setBusy(true);
     const f = current();
+    const preview = await call('runners:previewCreate', f);
+    if (!preview) {
+      setBusy(false);
+      return;
+    }
+    const checks = await call('runners:preflight', f);
+    if (!checks) {
+      setBusy(false);
+      return;
+    }
+    const failed = checks.some((check) => check.status === 'fail');
+    const approved = await confirm({
+      title: failed
+        ? tr('Preflight needs attention', 'การตรวจสอบก่อนสร้างยังมีปัญหา')
+        : tr(
+            `Create ${preview.runners.length} runner${preview.runners.length === 1 ? '' : 's'}?`,
+            `สร้าง Runner ${preview.runners.length} ตัวหรือไม่?`,
+          ),
+      description: (
+        <div className="space-y-2 text-sm">
+          <p>
+            {targetKey(preview.target)} ·{' '}
+            {preview.mode === 'service' ? 'OS service' : 'App process'} ·
+            {tr('Labels', 'Labels')}:{' '}
+            {preview.labels.join(', ') || tr('none', 'ไม่มี')}
+          </p>
+          {preview.requiresAdmin && (
+            <p>
+              {tr(
+                'Administrator approval is required to install the service.',
+                'ต้องอนุญาตสิทธิ์ผู้ดูแลระบบเพื่อติดตั้ง service',
+              )}
+            </p>
+          )}
+          {preview.collisions.length > 0 && (
+            <p className="text-attention">
+              {tr('Existing names skipped', 'ข้ามชื่อที่มีอยู่แล้ว')}:{' '}
+              {preview.collisions.join(', ')}
+            </p>
+          )}
+          <div className="max-h-48 overflow-auto rounded border p-2 font-mono text-xs">
+            {preview.runners.map((r) => (
+              <p key={r.name}>
+                {r.name} · {r.path}
+              </p>
+            ))}
+          </div>
+          <div className="space-y-1 border-t pt-2">
+            {checks.map((check) => (
+              <p key={check.name}>
+                <strong
+                  className={
+                    check.status === 'fail'
+                      ? 'text-destructive'
+                      : check.status === 'unknown'
+                        ? 'text-attention'
+                        : 'text-success'
+                  }
+                >
+                  {check.status.toUpperCase()}
+                </strong>{' '}
+                {check.name}: {check.message}
+              </p>
+            ))}
+          </div>
+        </div>
+      ),
+      confirmLabel: failed
+        ? tr('Close', 'ปิด')
+        : tr('Start creating', 'เริ่มสร้าง'),
+    });
+    if (!approved || failed) {
+      setBusy(false);
+      return;
+    }
+    let acknowledgePublicRisk = false;
+    if (f.target.kind === 'repo') {
+      let visibility: 'public' | 'private' | 'unknown' = 'unknown';
+      try {
+        visibility = await api.invoke(
+          'connections:repoVisibility',
+          f.connectionId,
+          f.target.owner,
+          f.target.repo,
+        );
+      } catch {
+        // A failed visibility check must still show the risk before creation.
+      }
+      if (visibility !== 'private') {
+        acknowledgePublicRisk = await confirm({
+          title:
+            visibility === 'public'
+              ? tr(
+                  'Public repository runner risk',
+                  'ความเสี่ยงของ Runner ใน repository สาธารณะ',
+                )
+              : tr(
+                  'Repository visibility could not be verified',
+                  'ตรวจสอบการมองเห็นของ repository ไม่สำเร็จ',
+                ),
+          description: tr(
+            'A persistent self-hosted runner can execute code from workflows and pull requests on this machine. Cleaning the job workspace does not isolate the machine or remove this risk. Only continue if you trust who can trigger workflows for this repository.',
+            'Runner แบบถาวรสามารถรันโค้ดจาก workflow และ pull request บนเครื่องนี้ได้ การล้าง workspace ไม่ได้แยกสภาพแวดล้อมของเครื่อง โปรดดำเนินการต่อเมื่อเชื่อถือผู้ที่สั่ง workflow ได้เท่านั้น',
+          ),
+          confirmLabel: tr(
+            'I understand, create runners',
+            'เข้าใจความเสี่ยงและสร้าง Runner',
+          ),
+          destructive: true,
+        });
+        if (!acknowledgePublicRisk) {
+          setBusy(false);
+          return;
+        }
+      }
+    }
     const ids = await call('runners:create', {
       ...f,
+      acknowledgePublicRisk,
+      expectedNames: preview.runners.map((r) => r.name),
       servicePassword:
         f.mode === 'service' && isWin && f.serviceAccount
           ? password
@@ -214,6 +409,27 @@ export function CreateDialog({
     });
     setBusy(false);
     if (ids) {
+      const selected = { connectionId: f.connectionId, target: f.target };
+      setChoices((c) => ({
+        ...c,
+        recent: [
+          selected,
+          ...c.recent.filter((x) => choiceKey(x) !== choiceKey(selected)),
+        ].slice(0, 8),
+      }));
+      try {
+        localStorage.setItem(
+          RECENT_CREATE_KEY,
+          JSON.stringify({
+            connectionId: f.connectionId,
+            target: f.target,
+            prefix: f.prefix,
+            mode: f.mode,
+          }),
+        );
+      } catch {
+        // Runner creation succeeded even if local preferences cannot be saved.
+      }
       toast.success(
         `Creating ${ids.length} runner${ids.length === 1 ? '' : 's'}…`,
       );
@@ -247,14 +463,50 @@ export function CreateDialog({
     setTargetInput(text);
     set({ target: parseTarget(text, targets), runnerGroup: undefined });
   };
+  const currentChoice = {
+    connectionId: form.connectionId,
+    target: form.target,
+  };
+  const isFavorite = choices.favorites.some(
+    (c) => choiceKey(c) === choiceKey(currentChoice),
+  );
+  const toggleFavorite = () =>
+    setChoices((c) => ({
+      ...c,
+      favorites: isFavorite
+        ? c.favorites.filter((x) => choiceKey(x) !== choiceKey(currentChoice))
+        : [currentChoice, ...c.favorites],
+    }));
+  const chooseTarget = (target: Target) => {
+    set({ target, runnerGroup: undefined });
+    setTargetInput(targetText(target));
+  };
+  const suggested = [...choices.favorites, ...choices.recent]
+    .filter((c) => c.connectionId === form.connectionId)
+    .filter(
+      (c, i, array) =>
+        array.findIndex((x) => choiceKey(x) === choiceKey(c)) === i,
+    );
+
+  const resetDefaults = () => {
+    localStorage.removeItem(RECENT_CREATE_KEY);
+    const f = defaultForm(info?.hostname ?? 'runner', connections[0]?.id ?? '');
+    setForm(f);
+    setTargetInput(targetText(f.target));
+    setLabelsText('');
+    setPassword('');
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Create runners</DialogTitle>
+          <DialogTitle>{tr('Create runners', 'สร้าง Runners')}</DialogTitle>
           <DialogDescription>
-            Downloads the latest runner, verifies its SHA256 and registers{' '}
+            {tr(
+              'Downloads the latest runner, verifies its SHA256 and registers',
+              'ดาวน์โหลด Runner เวอร์ชันล่าสุด ตรวจ SHA256 และลงทะเบียน',
+            )}{' '}
             {form.count} runner{form.count === 1 ? '' : 's'}.
           </DialogDescription>
         </DialogHeader>
@@ -309,15 +561,57 @@ export function CreateDialog({
                 : 'Type to search, or enter owner/repo (repository) or a name (organization).'
             }
           >
-            <Input
-              list="grc-targets"
-              value={targetInput}
-              onChange={(e) => onTargetInput(e.target.value)}
-              placeholder="owner/repo or organization"
-              disabled={!form.connectionId}
-              className="font-mono"
-            />
+            <div className="flex gap-2">
+              <Input
+                list="grc-targets"
+                value={targetInput}
+                onChange={(e) => onTargetInput(e.target.value)}
+                placeholder="owner/repo or organization"
+                disabled={!form.connectionId}
+                className="font-mono"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                disabled={!targetValid}
+                onClick={toggleFavorite}
+                aria-label={
+                  isFavorite ? 'Remove favorite target' : 'Favorite target'
+                }
+                title={isFavorite ? 'Remove favorite' : 'Favorite target'}
+              >
+                <Star className={isFavorite ? 'fill-current' : ''} />
+              </Button>
+            </div>
+            {suggested.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {suggested.map((choice) => (
+                  <Button
+                    key={choiceKey(choice)}
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 font-mono text-xs"
+                    onClick={() => chooseTarget(choice.target)}
+                  >
+                    {choices.favorites.some(
+                      (f) => choiceKey(f) === choiceKey(choice),
+                    )
+                      ? '★ '
+                      : ''}
+                    {targetText(choice.target)}
+                  </Button>
+                ))}
+              </div>
+            )}
             <datalist id="grc-targets">
+              {suggested.map((choice) => (
+                <option
+                  key={choiceKey(choice)}
+                  value={targetText(choice.target)}
+                />
+              ))}
               {targets?.map((t) => (
                 <option key={t.label} value={t.label} />
               ))}
@@ -489,6 +783,9 @@ export function CreateDialog({
 
         <DialogFooter className="items-center sm:justify-between">
           <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={resetDefaults}>
+              {tr('Reset defaults', 'คืนค่าเริ่มต้น')}
+            </Button>
             <Input
               value={presetName}
               onChange={(e) => setPresetName(e.target.value)}
@@ -501,16 +798,16 @@ export function CreateDialog({
               onClick={savePreset}
               disabled={!presetName.trim() || !valid}
             >
-              <Save /> Save preset
+              <Save /> {tr('Save preset', 'บันทึก Preset')}
             </Button>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
+              {tr('Cancel', 'ยกเลิก')}
             </Button>
             <Button onClick={create} disabled={!valid || busy}>
-              {busy ? <Loader2 className="animate-spin" /> : null} Create{' '}
-              {form.count}
+              {busy ? <Loader2 className="animate-spin" /> : null}{' '}
+              {tr('Create', 'สร้าง')} {form.count}
             </Button>
           </div>
         </DialogFooter>

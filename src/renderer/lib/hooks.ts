@@ -2,7 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import type { AppInfo, Connection, Preset, Snapshot } from '../../shared/types';
 import { api, call } from './api';
 
-const EMPTY: Snapshot = { runners: [], foreign: [], quitPending: false };
+const EMPTY: Snapshot = {
+  runners: [],
+  foreign: [],
+  watched: [],
+  operations: [],
+  quitPending: false,
+};
 
 export function useSnapshot(): Snapshot {
   const [snap, setSnap] = useState<Snapshot>(EMPTY);
