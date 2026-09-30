@@ -2,13 +2,27 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { app } from 'electron';
-import type { Settings } from '../shared/types';
+import type {
+  Connection,
+  Preset,
+  RunnerRecord,
+  Settings,
+} from '../shared/types';
 
 const SCHEMA_VERSION = 1;
+
+export interface ConnectionRecord extends Connection {
+  /** Base64 of the safeStorage-encrypted token, or the plain token if encryption is unavailable. */
+  token: string;
+  tokenEncrypted: boolean;
+}
 
 export interface DbData {
   schemaVersion: number;
   settings: Settings;
+  connections: ConnectionRecord[];
+  runners: RunnerRecord[];
+  presets: Preset[];
 }
 
 function defaultRootDir(): string {
@@ -25,7 +39,13 @@ function defaults(): DbData {
       rootDir: defaultRootDir(),
       diagRetentionDays: 7,
       notifications: true,
+      launchAtLogin: false,
+      // The runner's worker is known to crash under th-TH; default on for Thai systems.
+      invariantCulture: app.getSystemLocale().toLowerCase().startsWith('th'),
     },
+    connections: [],
+    runners: [],
+    presets: [],
   };
 }
 
@@ -35,6 +55,9 @@ function migrate(raw: Partial<DbData>): DbData {
   return {
     schemaVersion: SCHEMA_VERSION,
     settings: { ...base.settings, ...raw.settings },
+    connections: raw.connections ?? [],
+    runners: raw.runners ?? [],
+    presets: raw.presets ?? [],
   };
 }
 
@@ -68,4 +91,20 @@ export function update(mutate: (d: DbData) => void): Promise<void> {
     await fs.promises.rename(tmp, dbPath());
   });
   return writing;
+}
+
+export function getRunner(id: string): RunnerRecord {
+  const r = load().runners.find((x) => x.id === id);
+  if (!r) throw new Error(`Unknown runner ${id}`);
+  return r;
+}
+
+export function updateRunner(
+  id: string,
+  patch: Partial<RunnerRecord>,
+): Promise<void> {
+  return update((d) => {
+    const r = d.runners.find((x) => x.id === id);
+    if (r) Object.assign(r, patch);
+  });
 }

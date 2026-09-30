@@ -7,9 +7,22 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 const config = {
   packagerConfig: {
     asar: true,
+    executableName: 'grc-self-host',
   },
   rebuildConfig: {},
-  makers: [new MakerSquirrel({}), new MakerDeb({})],
+  // Windows installer and a Debian package; macOS is out of scope.
+  makers: [
+    new MakerSquirrel({ setupExe: 'GRC-Self-Host-Setup.exe' }),
+    new MakerDeb({
+      options: {
+        name: 'grc-self-host',
+        productName: 'GRC Self-Host',
+        genericName: 'GitHub Actions runner manager',
+        categories: ['Development'],
+        bin: 'grc-self-host',
+      },
+    }),
+  ],
   plugins: [
     new VitePlugin({
       // `build` can specify multiple entry builds, which can be Main process, Preload scripts, Worker process, etc.

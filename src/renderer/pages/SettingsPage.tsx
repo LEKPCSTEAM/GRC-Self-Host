@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 
 export function SettingsPage() {
   const [saved, setSaved] = useState<Settings | null>(null);
@@ -86,17 +87,47 @@ export function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Notifications</CardTitle>
+          <CardTitle>App</CardTitle>
         </CardHeader>
-        <CardContent>
-          <Label>
-            <input
-              type="checkbox"
+        <CardContent className="flex flex-col gap-4">
+          <Label className="font-normal">
+            <Switch
+              checked={draft.launchAtLogin}
+              onCheckedChange={(launchAtLogin) => set({ launchAtLogin })}
+            />
+            Launch at login (starts hidden in the tray; installed app only)
+          </Label>
+          <Label className="font-normal">
+            <Switch
               checked={draft.notifications}
-              onChange={(e) => set({ notifications: e.target.checked })}
-              className="size-4"
+              onCheckedChange={(notifications) => set({ notifications })}
             />
             Notify when a runner goes offline or crashes
+          </Label>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Runner environment</CardTitle>
+          <CardDescription>
+            Written to each runner&apos;s .env. Restart runners to apply.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Label className="items-start font-normal">
+            <Switch
+              checked={draft.invariantCulture}
+              onCheckedChange={(invariantCulture) => set({ invariantCulture })}
+            />
+            <span>
+              Use invariant culture (DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1)
+              <span className="text-muted-foreground block pt-1 text-xs">
+                Fixes jobs failing instantly with
+                &quot;ArgumentOutOfRangeException … SecretMasker&quot; on some
+                system languages such as Thai. Jobs inherit this variable too.
+              </span>
+            </span>
           </Label>
         </CardContent>
       </Card>
