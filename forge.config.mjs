@@ -8,11 +8,19 @@ const config = {
   packagerConfig: {
     asar: true,
     executableName: 'grc-self-host',
+    // Extension is picked per platform (.ico on Windows).
+    icon: 'assets/icon',
+    // Copied to app.ico on install; see src/main/squirrel-icon.ts.
+    extraResource: ['assets/icon.ico'],
   },
   rebuildConfig: {},
   // Windows installer and a Debian package; macOS is out of scope.
   makers: [
-    new MakerSquirrel({ setupExe: 'GRC-Self-Host-Setup.exe' }),
+    new MakerSquirrel({
+      setupExe: 'GRC-Self-Host-Setup.exe',
+      setupIcon: 'assets/icon.ico',
+      loadingGif: 'assets/installer.gif',
+    }),
     new MakerDeb({
       options: {
         name: 'grc-self-host',
@@ -20,6 +28,7 @@ const config = {
         genericName: 'GitHub Actions runner manager',
         categories: ['Development'],
         bin: 'grc-self-host',
+        icon: 'assets/icon.png',
       },
     }),
   ],

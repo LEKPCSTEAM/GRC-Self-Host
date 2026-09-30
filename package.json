@@ -1,6 +1,6 @@
 {
   "name": "grc-self-host",
-  "productName": "grc-self-host",
+  "productName": "GRC Self-Host",
   "version": "1.0.0",
   "private": true,
   "description": "For self-host Github Runner Management",

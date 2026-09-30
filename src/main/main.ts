@@ -1,6 +1,8 @@
+import './squirrel-icon';
 import path from 'node:path';
 import { app, BrowserWindow, dialog, Menu, nativeImage, Tray } from 'electron';
 import started from 'electron-squirrel-startup';
+import appIcon from '../../assets/icon.png?inline';
 import trayIcon from '../../assets/tray.png?inline';
 import type { EventContract, EventName } from '../shared/ipc';
 import * as db from './db';
@@ -10,6 +12,10 @@ import * as manager from './runner/manager';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) app.quit();
+
+// userData defaults to the productName; keep the original folder so existing
+// db.json and runners survive the rename to "GRC Self-Host".
+app.setPath('userData', path.join(app.getPath('appData'), 'grc-self-host'));
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -28,7 +34,7 @@ function createWindow(show: boolean) {
     minWidth: 960,
     minHeight: 600,
     show: false,
-    icon: nativeImage.createFromDataURL(trayIcon),
+    icon: nativeImage.createFromDataURL(appIcon),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
     },
