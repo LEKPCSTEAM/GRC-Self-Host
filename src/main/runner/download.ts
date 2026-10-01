@@ -30,6 +30,7 @@ function platformId(): string {
 }
 
 let releaseCache: { at: number; release: Release } | undefined;
+let versionCache: { at: number; version: string } | undefined;
 
 async function latestRelease(): Promise<Release> {
   if (releaseCache && Date.now() - releaseCache.at < RELEASE_TTL_MS) {
@@ -73,7 +74,29 @@ async function latestRelease(): Promise<Release> {
     sha256,
   };
   releaseCache = { at: Date.now(), release };
+  versionCache = { at: Date.now(), version };
   return release;
+}
+
+/** Release metadata only; does not download or install the runner. */
+export async function latestRunnerVersion(): Promise<string> {
+  if (versionCache && Date.now() - versionCache.at < RELEASE_TTL_MS)
+    return versionCache.version;
+  const response = await fetch(
+    'https://api.github.com/repos/actions/runner/releases/latest',
+    {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'grc-self-host',
+      },
+    },
+  );
+  if (!response.ok)
+    throw new Error(`Cannot look up runner releases (HTTP ${response.status})`);
+  const data = (await response.json()) as { tag_name: string };
+  const version = data.tag_name.replace(/^v/, '');
+  versionCache = { at: Date.now(), version };
+  return version;
 }
 
 const inflight = new Map<string, Promise<RunnerPackage>>();

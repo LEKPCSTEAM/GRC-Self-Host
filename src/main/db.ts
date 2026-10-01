@@ -7,9 +7,12 @@ import type {
   Preset,
   RunnerRecord,
   Settings,
+  WatchTarget,
+  JournalEvent,
+  MaintenanceTask,
 } from '../shared/types';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 4;
 
 export interface ConnectionRecord extends Connection {
   /** Base64 of the safeStorage-encrypted token, or the plain token if encryption is unavailable. */
@@ -23,6 +26,9 @@ export interface DbData {
   connections: ConnectionRecord[];
   runners: RunnerRecord[];
   presets: Preset[];
+  watchedTargets: Pick<WatchTarget, 'id' | 'connectionId' | 'target'>[];
+  events: JournalEvent[];
+  maintenance: MaintenanceTask[];
 }
 
 function defaultRootDir(): string {
@@ -39,6 +45,8 @@ function defaults(): DbData {
       rootDir: defaultRootDir(),
       diagRetentionDays: 7,
       notifications: true,
+      language: 'en',
+      theme: 'system',
       launchAtLogin: false,
       // The runner's worker is known to crash under th-TH; default on for Thai systems.
       invariantCulture: app.getSystemLocale().toLowerCase().startsWith('th'),
@@ -46,6 +54,9 @@ function defaults(): DbData {
     connections: [],
     runners: [],
     presets: [],
+    watchedTargets: [],
+    events: [],
+    maintenance: [],
   };
 }
 
@@ -58,6 +69,9 @@ function migrate(raw: Partial<DbData>): DbData {
     connections: raw.connections ?? [],
     runners: raw.runners ?? [],
     presets: raw.presets ?? [],
+    watchedTargets: raw.watchedTargets ?? [],
+    events: raw.events ?? [],
+    maintenance: raw.maintenance ?? [],
   };
 }
 

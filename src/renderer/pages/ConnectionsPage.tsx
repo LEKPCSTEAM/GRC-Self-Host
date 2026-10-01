@@ -3,6 +3,7 @@ import { KeyRound, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import type { Connection } from '../../shared/types';
 import { call } from '@/lib/api';
+import { tr } from '@/lib/i18n';
 import { useConnections } from '@/lib/hooks';
 import { useConfirm } from '@/components/confirm';
 import { Button } from '@/components/ui/button';
@@ -27,16 +28,24 @@ function TokenHelp() {
   return (
     <div className="text-muted-foreground space-y-1 text-xs">
       <p>
-        Use a fine-grained personal access token. One token covers one resource
-        owner.
+        {tr(
+          'Use a fine-grained personal access token. One token covers one resource owner.',
+          'ใช้ fine-grained personal access token โดยหนึ่ง token ครอบคลุม resource owner หนึ่งราย',
+        )}
       </p>
       <ul className="list-disc pl-4">
         <li>
-          Repository runners: repository permission{' '}
+          {tr(
+            'Repository runners: repository permission',
+            'Runner ระดับ repository: สิทธิ์ repository',
+          )}{' '}
           <b>Administration: Read and write</b>
         </li>
         <li>
-          Organization runners: organization permission{' '}
+          {tr(
+            'Organization runners: organization permission',
+            'Runner ระดับ organization: สิทธิ์ organization',
+          )}{' '}
           <b>Self-hosted runners: Read and write</b>
         </li>
       </ul>
@@ -89,27 +98,38 @@ function ConnectionDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {editing ? 'Edit connection' : 'Add connection'}
+            {editing
+              ? tr('Edit connection', 'แก้ไขการเชื่อมต่อ')
+              : tr('Add connection', 'เพิ่มการเชื่อมต่อ')}
           </DialogTitle>
           <DialogDescription>
-            The token is validated against GitHub and stored encrypted.
+            {tr(
+              'The token is validated against GitHub and stored encrypted.',
+              'ตรวจสอบ token กับ GitHub และเก็บแบบเข้ารหัส',
+            )}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <Label htmlFor="c-name">Name</Label>
+            <Label htmlFor="c-name">{tr('Name', 'ชื่อ')}</Label>
             <Input
               id="c-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Defaults to the GitHub login"
+              placeholder={tr(
+                'Defaults to the GitHub login',
+                'ค่าเริ่มต้นคือชื่อบัญชี GitHub',
+              )}
             />
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="c-token">
               {editing
-                ? 'New token (leave empty to keep)'
-                : 'Personal access token'}
+                ? tr(
+                    'New token (leave empty to keep)',
+                    'Token ใหม่ (เว้นว่างเพื่อใช้เดิม)',
+                  )
+                : tr('Personal access token', 'Personal access token')}
             </Label>
             <Input
               id="c-token"
@@ -124,13 +144,13 @@ function ConnectionDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            {tr('Cancel', 'ยกเลิก')}
           </Button>
           <Button
             onClick={save}
             disabled={saving || (!editing && !token.trim())}
           >
-            {saving ? 'Checking…' : 'Save'}
+            {saving ? tr('Checking…', 'กำลังตรวจสอบ…') : tr('Save', 'บันทึก')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -154,9 +174,15 @@ export function ConnectionsPage() {
   const remove = async (c: Connection) => {
     if (
       !(await confirm({
-        title: `Remove connection "${c.name}"?`,
-        description: 'Presets using it are removed too.',
-        confirmLabel: 'Remove',
+        title: tr(
+          `Remove connection "${c.name}"?`,
+          `ลบการเชื่อมต่อ "${c.name}" หรือไม่?`,
+        ),
+        description: tr(
+          'Presets using it are removed too.',
+          'Preset ที่ใช้การเชื่อมต่อนี้จะถูกลบด้วย',
+        ),
+        confirmLabel: tr('Remove', 'ลบ'),
         destructive: true,
       }))
     )
@@ -168,18 +194,21 @@ export function ConnectionsPage() {
   return (
     <div className="flex max-w-3xl flex-col gap-4">
       {warning && (
-        <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-          <TriangleAlert className="size-4 text-amber-500" /> {warning}
+        <div className="flex items-center gap-2 rounded-md border border-attention/40 bg-attention/10 p-3 text-sm">
+          <TriangleAlert className="size-4 text-attention" /> {warning}
         </div>
       )}
       <div>
         <Button onClick={() => setDialog({ open: true, editing: null })}>
-          <Plus /> Add connection
+          <Plus /> {tr('Add connection', 'เพิ่มการเชื่อมต่อ')}
         </Button>
       </div>
       {connections.length === 0 && (
         <p className="text-muted-foreground text-sm">
-          No connections yet. Add a GitHub token to start creating runners.
+          {tr(
+            'No connections yet. Add a GitHub token to start creating runners.',
+            'ยังไม่มีการเชื่อมต่อ เพิ่ม GitHub token เพื่อเริ่มสร้าง Runner',
+          )}
         </p>
       )}
       {connections.map((c) => (
@@ -201,13 +230,13 @@ export function ConnectionsPage() {
                 size="sm"
                 onClick={() => setDialog({ open: true, editing: c })}
               >
-                Edit
+                {tr('Edit', 'แก้ไข')}
               </Button>
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={() => remove(c)}
-                aria-label="Remove"
+                aria-label={tr('Remove', 'ลบ')}
               >
                 <Trash2 />
               </Button>

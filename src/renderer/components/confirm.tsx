@@ -16,6 +16,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { tr } from '@/lib/i18n';
 
 interface ConfirmOptions {
   title: string;
@@ -67,13 +68,13 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => close(false)}>
-              Cancel
+              {tr('Cancel', 'ยกเลิก')}
             </AlertDialogCancel>
             <AlertDialogAction
               variant={opts?.destructive ? 'destructive' : 'default'}
               onClick={() => close(true)}
             >
-              {opts?.confirmLabel ?? 'Continue'}
+              {opts?.confirmLabel ?? tr('Continue', 'ดำเนินการต่อ')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

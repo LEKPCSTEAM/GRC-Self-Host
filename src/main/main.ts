@@ -1,6 +1,14 @@
 import './squirrel-icon';
 import path from 'node:path';
-import { app, BrowserWindow, dialog, Menu, nativeImage, Tray } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeImage,
+  nativeTheme,
+  Tray,
+} from 'electron';
 import started from 'electron-squirrel-startup';
 import appIcon from '../../assets/icon.png?inline';
 import trayIcon from '../../assets/tray.png?inline';
@@ -9,6 +17,7 @@ import * as db from './db';
 import { registerIpc } from './ipc';
 import { HIDDEN_ARG } from './login';
 import * as manager from './runner/manager';
+import * as maintenance from './maintenance';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) app.quit();
@@ -70,10 +79,27 @@ function showWindow() {
 }
 
 function updateTrayMenu() {
-  const pending = manager.snapshot().quitPending;
+  const snapshot = manager.snapshot();
+  const pending = snapshot.quitPending;
+  const busy = snapshot.runners.filter((r) => r.status.busy).length;
+  const problems = snapshot.runners.filter(
+    (r) =>
+      r.status.broken ||
+      r.status.lastError ||
+      r.status.local === 'crashed' ||
+      (r.status.github === 'offline' && r.status.local === 'running'),
+  ).length;
   tray?.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Open', click: showWindow },
+      { label: `Running jobs: ${busy}`, enabled: false },
+      {
+        label: `Needs attention: ${problems}`,
+        click: () => {
+          showWindow();
+          send('command', 'problems');
+        },
+      },
       {
         label: 'Create runners…',
         click: () => {
@@ -153,12 +179,16 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showWindow);
 
   app.whenReady().then(async () => {
-    db.load();
+    nativeTheme.themeSource = db.load().settings.theme ?? 'system';
     registerIpc();
-    manager.onSnapshot((s) => send('snapshot', s));
+    manager.onSnapshot((s) => {
+      send('snapshot', s);
+      updateTrayMenu();
+    });
     createTray();
     createWindow(!process.argv.includes(HIDDEN_ARG));
     await manager.init();
+    await maintenance.init();
   });
 
   app.on('before-quit', (e) => {

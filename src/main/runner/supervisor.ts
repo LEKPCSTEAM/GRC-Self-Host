@@ -18,6 +18,7 @@ export type ChildState =
 export interface ChildEvents {
   onChange(): void;
   onCrashLimit(): void;
+  onJobCompleted?(): void;
 }
 
 /** Owns one runner's `run.cmd` / `run.sh` process. */
@@ -168,6 +169,7 @@ export class ChildRunner {
     const parts = text.split(/\r?\n/);
     this.partial = parts.pop() ?? '';
     let changed = false;
+    let jobCompleted = false;
     for (const line of parts) {
       if (!line.trim()) continue;
       this.append(line);
@@ -186,9 +188,11 @@ export class ChildRunner {
         this.busy = false;
         this.jobName = undefined;
         changed = true;
+        jobCompleted = true;
       }
     }
     if (changed) this.events.onChange();
+    if (jobCompleted && !this.busy) this.events.onJobCompleted?.();
   }
 
   private onExit(code: number | null) {

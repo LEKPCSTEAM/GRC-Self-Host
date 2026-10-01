@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Brush,
+  ChevronDown,
+  ChevronRight,
   CircleAlert,
   FolderOpen,
   Loader2,
   MoreHorizontal,
+  Pin,
   Play,
   Plus,
   RotateCw,
@@ -19,17 +22,21 @@ import {
 import { toast } from 'sonner';
 import type {
   BulkAction,
+  BulkResult,
   ForeignRunner,
   RunnerView,
   Snapshot,
 } from '../../shared/types';
 import { api, call, errorMessage, reportBulk } from '@/lib/api';
-import { targetKey, targetLabel } from '@/lib/format';
+import { formatBytes, targetKey, targetLabel } from '@/lib/format';
+import { localizeError, tr } from '@/lib/i18n';
 import { useAppInfo, useConnections } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import { useConfirm } from '@/components/confirm';
 import { LogsDialog } from '@/components/LogsDialog';
+import type { Form } from '@/components/CreateDialog';
 import {
+  BulkOptionsDialog,
   LabelsDialog,
   ModeDialog,
   OptionsDialog,
@@ -48,6 +55,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuCheckboxItem,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -74,15 +82,110 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 
-type Filter = 'all' | 'running' | 'stopped' | 'busy' | 'problem';
+export type Filter =
+  | 'all'
+  | 'running'
+  | 'stopped'
+  | 'online'
+  | 'offline'
+  | 'busy'
+  | 'broken'
+  | 'problem';
 
 const FILTERS: [Filter, string][] = [
   ['all', 'All'],
   ['running', 'Running'],
+  ['online', 'Online on GitHub'],
+  ['offline', 'Offline on GitHub'],
   ['busy', 'Running a job'],
+  ['broken', 'Broken'],
   ['stopped', 'Stopped'],
   ['problem', 'Needs attention'],
 ];
+
+type SortKey = 'name' | 'status' | 'target' | 'mode' | 'version';
+type ColumnKey = 'mode' | 'local' | 'github' | 'labels' | 'version';
+interface SavedView {
+  name: string;
+  filter: Filter;
+  query: string;
+  sort: SortKey;
+  descending: boolean;
+}
+interface TablePrefs {
+  sort: SortKey;
+  descending: boolean;
+  columns: ColumnKey[];
+  pinned: string[];
+  collapsed: string[];
+  views: SavedView[];
+}
+const PREFS_KEY = 'grc:runners-table';
+const DEFAULT_PREFS: TablePrefs = {
+  sort: 'name',
+  descending: false,
+  columns: ['mode', 'local', 'github', 'labels', 'version'],
+  pinned: [],
+  collapsed: [],
+  views: [],
+};
+
+function readPrefs(): TablePrefs {
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem(PREFS_KEY) ?? '{}',
+    ) as Partial<TablePrefs>;
+    const columns = DEFAULT_PREFS.columns.filter((c) =>
+      saved.columns?.includes(c),
+    );
+    return {
+      sort: ['name', 'status', 'target', 'mode', 'version'].includes(
+        saved.sort ?? '',
+      )
+        ? saved.sort!
+        : 'name',
+      descending:
+        typeof saved.descending === 'boolean' ? saved.descending : false,
+      columns: Array.isArray(saved.columns) ? columns : DEFAULT_PREFS.columns,
+      pinned: Array.isArray(saved.pinned)
+        ? saved.pinned.filter((x) => typeof x === 'string')
+        : [],
+      collapsed: Array.isArray(saved.collapsed)
+        ? saved.collapsed.filter((x) => typeof x === 'string')
+        : [],
+      views: Array.isArray(saved.views)
+        ? saved.views.filter(
+            (v) =>
+              v &&
+              typeof v.name === 'string' &&
+              typeof v.query === 'string' &&
+              FILTERS.some(([f]) => f === v.filter) &&
+              ['name', 'status', 'target', 'mode', 'version'].includes(
+                v.sort,
+              ) &&
+              typeof v.descending === 'boolean',
+          )
+        : [],
+    };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
+function sortValue(r: RunnerView, key: SortKey): string {
+  switch (key) {
+    case 'status':
+      return r.status.busy ? 'busy' : `${r.status.github}:${r.status.local}`;
+    case 'target':
+      return targetKey(r.target);
+    case 'mode':
+      return r.mode;
+    case 'version':
+      return r.version ?? '';
+    default:
+      return r.name;
+  }
+}
 
 function matches(r: RunnerView, f: Filter, q: string): boolean {
   const s = r.status;
@@ -104,6 +207,12 @@ function matches(r: RunnerView, f: Filter, q: string): boolean {
       return s.local === 'stopped';
     case 'busy':
       return s.busy;
+    case 'online':
+      return s.github === 'online';
+    case 'offline':
+      return s.github === 'offline';
+    case 'broken':
+      return Boolean(s.broken || s.local === 'crashed');
     case 'problem':
       return Boolean(
         s.broken ||
@@ -126,18 +235,9 @@ function LocalBadge({ r }: { r: RunnerView }) {
     );
   }
   const map: Record<string, [string, string]> = {
-    running: [
-      'Running',
-      'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
-    ],
-    starting: [
-      'Starting',
-      'bg-amber-500/15 text-amber-600 dark:text-amber-400',
-    ],
-    stopping: [
-      'Stopping',
-      'bg-amber-500/15 text-amber-600 dark:text-amber-400',
-    ],
+    running: ['Running', 'bg-success/15 text-success'],
+    starting: ['Starting', 'bg-attention/15 text-attention'],
+    stopping: ['Stopping', 'bg-attention/15 text-attention'],
     stopped: ['Stopped', 'bg-muted text-muted-foreground'],
     crashed: ['Crashed', 'bg-destructive/15 text-destructive'],
   };
@@ -150,29 +250,53 @@ function LocalBadge({ r }: { r: RunnerView }) {
   );
 }
 
-function GithubBadge({ r }: { r: RunnerView }) {
+function GithubBadge({ r, now }: { r: RunnerView; now: number }) {
   const s = r.status;
+  const checked = s.githubCheckedAt ? new Date(s.githubCheckedAt) : null;
+  const stale = !checked || now - checked.getTime() > 45_000;
+  const detail = (
+    <div
+      className="text-muted-foreground mt-1 text-[11px]"
+      title={s.githubError ? localizeError(s.githubError) : undefined}
+    >
+      {s.github === 'unknown'
+        ? s.githubError
+          ? localizeError(s.githubError)
+          : tr('Unable to verify GitHub status', 'ตรวจสถานะ GitHub ไม่ได้')
+        : stale
+          ? tr('Status may be stale', 'สถานะอาจไม่เป็นปัจจุบัน')
+          : tr('GitHub checked', 'ตรวจ GitHub แล้ว')}
+      {checked && ` ${checked.toLocaleTimeString()}`}
+    </div>
+  );
   if (s.busy) {
     return (
-      <Badge
-        variant="outline"
-        className="max-w-48 truncate border-transparent bg-sky-500/15 text-sky-600 dark:text-sky-400"
-      >
-        Busy{s.jobName ? `: ${s.jobName}` : ''}
-      </Badge>
+      <div>
+        <Badge
+          variant="outline"
+          className="max-w-48 truncate border-transparent bg-info/15 text-info"
+        >
+          {tr('Busy', 'กำลังทำงาน')}
+          {s.jobName ? `: ${s.jobName}` : ''}
+        </Badge>
+        {detail}
+      </div>
     );
   }
   const map: Record<string, [string, string]> = {
-    online: ['Online', 'bg-emerald-500'],
-    offline: ['Offline', 'bg-zinc-400'],
-    missing: ['Not registered', 'bg-red-500'],
-    unknown: ['—', 'bg-transparent'],
+    online: ['Online', 'bg-success'],
+    offline: ['Offline', 'bg-muted-foreground/60'],
+    missing: ['Not registered', 'bg-danger'],
+    unknown: ['Not verified', 'bg-attention'],
   };
   const [label, dot] = map[s.github] ?? ['—', ''];
   return (
-    <span className="flex items-center gap-1.5 text-xs">
-      <span className={cn('size-2 rounded-full', dot)} /> {label}
-    </span>
+    <div>
+      <span className="flex items-center gap-1.5 text-xs">
+        <span className={cn('size-2 rounded-full', dot)} /> {label}
+      </span>
+      {detail}
+    </div>
   );
 }
 
@@ -216,21 +340,49 @@ function PasswordDialog({
 export function RunnersPage({
   snapshot,
   onCreate,
+  filter,
+  onFilterChange,
 }: {
   snapshot: Snapshot;
-  onCreate: () => void;
+  onCreate: (initial?: Form) => void;
+  filter: Filter;
+  onFilterChange: (filter: Filter) => void;
 }) {
   const info = useAppInfo();
   const [connections] = useConnections();
   const confirm = useConfirm();
-  const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
+  const [prefs, setPrefs] = useState(readPrefs);
+  const [viewName, setViewName] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [logsFor, setLogsFor] = useState<RunnerView | null>(null);
   const [labelsFor, setLabelsFor] = useState<RunnerView[] | null>(null);
   const [modeFor, setModeFor] = useState<RunnerView | null>(null);
   const [optionsFor, setOptionsFor] = useState<RunnerView | null>(null);
+  const [bulkOptionsFor, setBulkOptionsFor] = useState<RunnerView[] | null>(
+    null,
+  );
   const [repairFor, setRepairFor] = useState<RunnerView | null>(null);
+  const [detailsId, setDetailsId] = useState<string | null>(null);
+  const [skipBusy, setSkipBusy] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const [failedBulk, setFailedBulk] = useState<{
+    action: BulkAction;
+    results: BulkResult[];
+  } | null>(null);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      /* Local preferences are optional. */
+    }
+  }, [prefs]);
 
   const connName = useMemo(
     () => new Map(connections.map((c) => [c.id, c.name])),
@@ -248,11 +400,12 @@ export function RunnersPage({
   const groups = useMemo(() => {
     const m = new Map<
       string,
-      { title: string; subtitle: string; runners: RunnerView[] }
+      { key: string; title: string; subtitle: string; runners: RunnerView[] }
     >();
     for (const r of visible) {
       const key = `${r.connectionId}|${targetKey(r.target).toLowerCase()}`;
       const g = m.get(key) ?? {
+        key,
         title: targetLabel(r.target),
         subtitle: connName.get(r.connectionId) ?? '',
         runners: [],
@@ -260,12 +413,29 @@ export function RunnersPage({
       g.runners.push(r);
       m.set(key, g);
     }
-    for (const g of m.values())
-      g.runners.sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { numeric: true }),
+    const compare = (a: RunnerView, b: RunnerView) => {
+      const pinned =
+        Number(prefs.pinned.includes(b.id)) -
+        Number(prefs.pinned.includes(a.id));
+      if (pinned) return pinned;
+      const order = sortValue(a, prefs.sort).localeCompare(
+        sortValue(b, prefs.sort),
+        undefined,
+        { numeric: true },
       );
-    return [...m.values()].sort((a, b) => a.title.localeCompare(b.title));
-  }, [visible, connName]);
+      return (
+        (prefs.descending ? -order : order) ||
+        a.name.localeCompare(b.name, undefined, { numeric: true })
+      );
+    };
+    for (const g of m.values()) g.runners.sort(compare);
+    return [...m.values()].sort((a, b) =>
+      prefs.sort === 'target'
+        ? (prefs.descending ? -1 : 1) * a.title.localeCompare(b.title)
+        : compare(a.runners[0]!, b.runners[0]!) ||
+          a.title.localeCompare(b.title),
+    );
+  }, [visible, connName, prefs.sort, prefs.descending, prefs.pinned]);
 
   // Drop selections that disappeared.
   useEffect(() => {
@@ -296,6 +466,16 @@ export function RunnersPage({
   }, [visible]);
 
   const selectedRunners = snapshot.runners.filter((r) => selected.has(r.id));
+  const details = snapshot.runners.find((r) => r.id === detailsId) ?? null;
+
+  const copy = async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`Copied ${label}`);
+    } catch {
+      toast.error(tr(`Could not copy ${label}`, `คัดลอก ${label} ไม่สำเร็จ`));
+    }
+  };
 
   const toggle = (ids: string[], on: boolean) =>
     setSelected((s) => {
@@ -309,21 +489,74 @@ export function RunnersPage({
 
   const bulk = async (rs: RunnerView[], action: BulkAction) => {
     const busy = rs.filter((r) => r.status.busy);
-    if ((action === 'stop' || action === 'restart') && busy.length) {
+    if (
+      (action === 'stop' || action === 'restart') &&
+      busy.length &&
+      !skipBusy
+    ) {
       const ok = await confirm({
-        title: `${busy.length} runner${busy.length === 1 ? ' is' : 's are'} running a job`,
-        description: `${busy.map((r) => r.name).join(', ')} will be stopped and the job will fail. Continue?`,
-        confirmLabel: action === 'stop' ? 'Stop anyway' : 'Restart anyway',
+        title: tr(
+          `${busy.length} runner${busy.length === 1 ? ' is' : 's are'} running a job`,
+          `Runner ${busy.length} ตัวกำลังทำ job`,
+        ),
+        description: tr(
+          `${busy.map((r) => r.name).join(', ')} will be stopped and the job will fail. Continue?`,
+          `${busy.map((r) => r.name).join(', ')} จะถูกหยุดและ job จะล้มเหลว ดำเนินการต่อหรือไม่?`,
+        ),
+        confirmLabel:
+          action === 'stop'
+            ? tr('Stop anyway', 'หยุดต่อ')
+            : tr('Restart anyway', 'เริ่มใหม่ต่อ'),
         destructive: true,
       });
       if (!ok) return;
     }
     if (action === 'clean') {
+      const report = await call('disk:report');
+      if (!report) return;
+      const preview = report.runners.filter((item) =>
+        rs.some((r) => r.id === item.id),
+      );
+      const estimated = preview.reduce((sum, item) => sum + item.cleanBytes, 0);
       const ok = await confirm({
-        title: `Clean ${rs.length} runner${rs.length === 1 ? '' : 's'}?`,
-        description:
-          'Empties job workspaces and _temp (and _actions / _tool if enabled). The repository mapping is kept. Busy runners are skipped.',
-        confirmLabel: 'Clean',
+        title: tr(
+          `Clean ${rs.length} runner${rs.length === 1 ? '' : 's'}?`,
+          `ล้างข้อมูล Runner ${rs.length} ตัวหรือไม่?`,
+        ),
+        description: (
+          <div className="space-y-2 text-left">
+            <p>
+              {tr('Estimated space to clear', 'พื้นที่ที่จะล้างโดยประมาณ')}:{' '}
+              {formatBytes(estimated)}.{' '}
+              {tr(
+                'Busy runners are skipped. Repository mapping is kept.',
+                'ข้าม Runner ที่กำลังทำ job และเก็บ repository mapping ไว้',
+              )}
+            </p>
+            <div className="max-h-52 space-y-2 overflow-auto rounded border p-2 font-mono text-xs">
+              {preview.map((item) => (
+                <div key={item.id}>
+                  <strong>
+                    {names.get(item.id)} · {formatBytes(item.cleanBytes)}
+                  </strong>
+                  {item.cleanPaths.length === 0 && <p>Nothing to remove</p>}
+                  {item.cleanPaths.map((target) => (
+                    <p key={target.path} className="break-all">
+                      {target.path} · {formatBytes(target.bytes)}
+                    </p>
+                  ))}
+                  {item.omittedPaths > 0 && (
+                    <p>…and {item.omittedPaths} more paths</p>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p className="text-xs">
+              Sizes are approximate and may change before clean runs.
+            </p>
+          </div>
+        ),
+        confirmLabel: tr('Clean', 'ล้างข้อมูล'),
       });
       if (!ok) return;
     }
@@ -333,26 +566,49 @@ export function RunnersPage({
       restart: 'Restarted',
       clean: 'Cleaned',
     };
-    reportBulk(
-      verbs[action],
-      await call(
-        'runners:bulk',
-        rs.map((r) => r.id),
-        action,
-      ),
-      names,
+    const results = await call(
+      'runners:bulk',
+      rs.map((r) => r.id),
+      action,
+      skipBusy,
     );
+    reportBulk(verbs[action], results, names);
+    if (results) {
+      const failed = results.filter((r) => !r.ok && !r.skipped);
+      setFailedBulk(failed.length ? { action, results: failed } : null);
+    }
+  };
+
+  const stopAfterCurrentJob = async (runner: RunnerView) => {
+    if (runner.status.stopAfterJob) {
+      await call('runners:stopAfterJob', runner.id, false);
+      return;
+    }
+    const ok = await confirm({
+      title: tr('Stop after this job?', 'หยุดหลัง job นี้จบหรือไม่?'),
+      description: tr(
+        'This works only for an app process managed in this session. GRC waits for the local completion message, then disconnects the runner. GitHub may assign another job before it disconnects, so this is best effort. Keep the app running.',
+        'ใช้ได้เฉพาะ app process ที่แอปนี้กำลังดูแลอยู่ GRC จะรอข้อความว่า job จบแล้วจึงตัดการเชื่อมต่อ GitHub อาจมอบ job ใหม่ก่อนตัดการเชื่อมต่อ จึงไม่รับประกันว่าจะหยุดทันที และต้องเปิดแอปไว้',
+      ),
+      confirmLabel: tr('Stop when job completes', 'หยุดเมื่อ job จบ'),
+    });
+    if (ok) await call('runners:stopAfterJob', runner.id, true);
   };
 
   const remove = async (rs: RunnerView[]) => {
     const busy = rs.filter((r) => r.status.busy);
     const ok = await confirm({
-      title: `Delete ${rs.length} runner${rs.length === 1 ? '' : 's'}?`,
+      title: tr(
+        `Delete ${rs.length} runner${rs.length === 1 ? '' : 's'}?`,
+        `ลบ Runner ${rs.length} ตัวหรือไม่?`,
+      ),
       description: (
         <div className="space-y-2">
           <p>
-            Deregisters from GitHub, uninstalls services and deletes the runner
-            folders.
+            {tr(
+              'Deregisters from GitHub, uninstalls services and deletes the runner folders.',
+              'ยกเลิกการลงทะเบียนใน GitHub ถอน service และลบโฟลเดอร์ Runner',
+            )}
           </p>
           {busy.length > 0 && (
             <p className="text-destructive font-medium">
@@ -363,7 +619,7 @@ export function RunnersPage({
           )}
         </div>
       ),
-      confirmLabel: 'Delete',
+      confirmLabel: tr('Delete', 'ลบ'),
       destructive: true,
     });
     if (!ok) return;
@@ -385,10 +641,12 @@ export function RunnersPage({
 
   const forget = async (r: RunnerView) => {
     const ok = await confirm({
-      title: `Forget ${r.name}?`,
-      description:
+      title: tr(`Forget ${r.name}?`, `ลบ ${r.name} ออกจากแอปหรือไม่?`),
+      description: tr(
         'Removes it from this app, uninstalls its service if any and deletes its folder. GitHub registration is removed if possible.',
-      confirmLabel: 'Forget',
+        'ลบ Runner ออกจากแอป ถอน service และลบโฟลเดอร์ รวมถึงยกเลิกการลงทะเบียน GitHub หากทำได้',
+      ),
+      confirmLabel: tr('Forget', 'ลบออก'),
       destructive: true,
     });
     if (ok) await call('runners:forget', r.id);
@@ -424,11 +682,57 @@ export function RunnersPage({
 
   const allVisibleSelected =
     visible.length > 0 && visible.every((r) => selected.has(r.id));
+  const hasColumn = (column: ColumnKey) => prefs.columns.includes(column);
+  const setColumn = (column: ColumnKey, show: boolean) =>
+    setPrefs((p) => ({
+      ...p,
+      columns: show
+        ? [...p.columns, column]
+        : p.columns.filter((c) => c !== column),
+    }));
+  const togglePinned = (id: string) =>
+    setPrefs((p) => ({
+      ...p,
+      pinned: p.pinned.includes(id)
+        ? p.pinned.filter((x) => x !== id)
+        : [...p.pinned, id],
+    }));
+  const toggleCollapsed = (key: string) =>
+    setPrefs((p) => ({
+      ...p,
+      collapsed: p.collapsed.includes(key)
+        ? p.collapsed.filter((x) => x !== key)
+        : [...p.collapsed, key],
+    }));
+  const saveView = () => {
+    const name = viewName.trim();
+    if (!name) return;
+    if (prefs.views.some((v) => v.name.toLowerCase() === name.toLowerCase())) {
+      toast.error(tr('A view with this name already exists', 'มีมุมมองชื่อนี้แล้ว'));
+      return;
+    }
+    setPrefs((p) => ({
+      ...p,
+      views: [
+        ...p.views,
+        { name, filter, query, sort: p.sort, descending: p.descending },
+      ],
+    }));
+    setViewName('');
+    toast.success(`Saved view "${name}"`);
+  };
+  const applyView = (name: string) => {
+    const view = prefs.views.find((v) => v.name === name);
+    if (!view) return;
+    onFilterChange(view.filter);
+    setQuery(view.query);
+    setPrefs((p) => ({ ...p, sort: view.sort, descending: view.descending }));
+  };
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={onCreate}>
+        <Button onClick={() => onCreate()}>
           <Plus /> Create runners{' '}
           <kbd className="ml-1 text-[10px] opacity-60">Ctrl+N</kbd>
         </Button>
@@ -441,7 +745,10 @@ export function RunnersPage({
             className="w-64 pl-8"
           />
         </div>
-        <Select value={filter} onValueChange={(v) => setFilter(v as Filter)}>
+        <Select
+          value={filter}
+          onValueChange={(v) => onFilterChange(v as Filter)}
+        >
           <SelectTrigger className="w-44">
             <SelectValue />
           </SelectTrigger>
@@ -460,10 +767,159 @@ export function RunnersPage({
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-muted-foreground">Sort</span>
+        <Select
+          value={prefs.sort}
+          onValueChange={(sort) =>
+            setPrefs((p) => ({ ...p, sort: sort as SortKey }))
+          }
+        >
+          <SelectTrigger size="sm" className="w-36">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {(['name', 'status', 'target', 'mode', 'version'] as SortKey[]).map(
+              (key) => (
+                <SelectItem key={key} value={key}>
+                  {key[0]!.toUpperCase() + key.slice(1)}
+                </SelectItem>
+              ),
+            )}
+          </SelectContent>
+        </Select>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setPrefs((p) => ({ ...p, descending: !p.descending }))}
+        >
+          {prefs.descending ? 'Descending' : 'Ascending'}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="outline">
+              Columns
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent>
+            {DEFAULT_PREFS.columns.map((column) => (
+              <DropdownMenuCheckboxItem
+                key={column}
+                checked={hasColumn(column)}
+                onCheckedChange={(checked) => setColumn(column, checked)}
+              >
+                {column[0]!.toUpperCase() + column.slice(1)}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {prefs.views.length > 0 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="outline">
+                Saved views
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              {prefs.views.map((view) => (
+                <DropdownMenuItem
+                  key={view.name}
+                  onClick={() => applyView(view.name)}
+                >
+                  {view.name}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+        <Input
+          value={viewName}
+          onChange={(e) => setViewName(e.target.value)}
+          placeholder="New view name"
+          className="h-8 w-40"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!viewName.trim()}
+          onClick={saveView}
+        >
+          Save view
+        </Button>
+        {prefs.views.length > 0 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="ghost">
+                Delete view
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              {prefs.views.map((view) => (
+                <DropdownMenuItem
+                  key={view.name}
+                  onClick={() =>
+                    setPrefs((p) => ({
+                      ...p,
+                      views: p.views.filter((v) => v.name !== view.name),
+                    }))
+                  }
+                >
+                  {view.name}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </div>
+
       {snapshot.quitPending && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+        <div className="rounded-md border border-attention/40 bg-attention/10 p-3 text-sm">
           The app will quit when running jobs finish. Use the tray menu to
           cancel.
+        </div>
+      )}
+
+      {failedBulk && (
+        <div className="border-destructive/40 rounded-md border p-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <strong>
+              {failedBulk.results.length} {failedBulk.action} action
+              {failedBulk.results.length === 1 ? '' : 's'} failed
+            </strong>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  void bulk(
+                    snapshot.runners.filter((r) =>
+                      failedBulk.results.some((f) => f.id === r.id),
+                    ),
+                    failedBulk.action,
+                  )
+                }
+              >
+                Retry failed only
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setFailedBulk(null)}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </div>
+          <ul className="mt-2 space-y-1">
+            {failedBulk.results.map((r) => (
+              <li key={r.id}>
+                <span className="font-mono">{names.get(r.id) ?? r.id}</span>:{' '}
+                {r.error
+                  ? localizeError(r.error)
+                  : tr('Unknown error', 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ')}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -493,6 +949,13 @@ export function RunnersPage({
           >
             <RotateCw /> Restart
           </Button>
+          <label className="flex items-center gap-2 px-2 text-xs">
+            <Checkbox
+              checked={skipBusy}
+              onCheckedChange={(v) => setSkipBusy(v === true)}
+            />
+            Skip runners running a job for Stop/Restart
+          </label>
           <Button
             size="sm"
             variant="outline"
@@ -506,6 +969,13 @@ export function RunnersPage({
             onClick={() => setLabelsFor(selectedRunners)}
           >
             <Tags /> Labels
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setBulkOptionsFor(selectedRunners)}
+          >
+            <Settings2 /> Options
           </Button>
           <Button
             size="sm"
@@ -552,11 +1022,11 @@ export function RunnersPage({
                   />
                 </TableHead>
                 <TableHead>Name</TableHead>
-                <TableHead>Mode</TableHead>
-                <TableHead>Local</TableHead>
-                <TableHead>GitHub</TableHead>
-                <TableHead>Labels</TableHead>
-                <TableHead>Version</TableHead>
+                {hasColumn('mode') && <TableHead>Mode</TableHead>}
+                {hasColumn('local') && <TableHead>Local</TableHead>}
+                {hasColumn('github') && <TableHead>GitHub</TableHead>}
+                {hasColumn('labels') && <TableHead>Labels</TableHead>}
+                {hasColumn('version') && <TableHead>Version</TableHead>}
                 <TableHead className="w-10" />
               </TableRow>
             </TableHeader>
@@ -564,6 +1034,7 @@ export function RunnersPage({
               {groups.map((g) => {
                 const ids = g.runners.map((r) => r.id);
                 const all = ids.every((id) => selected.has(id));
+                const collapsed = prefs.collapsed.includes(g.key);
                 return [
                   <TableRow
                     key={`g-${g.title}-${g.subtitle}`}
@@ -576,20 +1047,55 @@ export function RunnersPage({
                         aria-label={`Select ${g.title}`}
                       />
                     </TableCell>
-                    <TableCell colSpan={7} className="text-xs">
-                      <span className="font-semibold">{g.title}</span>
+                    <TableCell
+                      colSpan={2 + prefs.columns.length}
+                      className="text-xs"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleCollapsed(g.key)}
+                        aria-expanded={!collapsed}
+                        className="inline-flex items-center gap-1 font-semibold hover:underline"
+                      >
+                        {collapsed ? (
+                          <ChevronRight className="size-3.5" />
+                        ) : (
+                          <ChevronDown className="size-3.5" />
+                        )}
+                        {g.title}
+                      </button>
                       <span className="text-muted-foreground">
                         {' '}
                         · {g.subtitle} · {g.runners.length}
                       </span>
                     </TableCell>
                   </TableRow>,
-                  ...g.runners.map((r) => (
+                  ...(!collapsed ? g.runners : []).map((r) => (
                     <TableRow
                       key={r.id}
                       data-state={selected.has(r.id) ? 'selected' : undefined}
                       // The default selected background matches the badges and hides them.
-                      className="data-[state=selected]:bg-sky-500/10"
+                      className="cursor-pointer data-[state=selected]:bg-info/10"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        if (
+                          !(e.target as HTMLElement).closest(
+                            'button, [role=checkbox], a',
+                          ) &&
+                          !window.getSelection()?.toString()
+                        )
+                          setDetailsId(r.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (
+                          e.target === e.currentTarget &&
+                          (e.key === 'Enter' || e.key === ' ')
+                        ) {
+                          e.preventDefault();
+                          setDetailsId(r.id);
+                        }
+                      }}
+                      aria-label={`Details for ${r.name}`}
                     >
                       <TableCell>
                         <Checkbox
@@ -599,11 +1105,30 @@ export function RunnersPage({
                         />
                       </TableCell>
                       <TableCell>
-                        <div className="font-mono text-sm">{r.name}</div>
+                        <div className="flex items-center gap-1 font-mono text-sm">
+                          <button
+                            type="button"
+                            className={
+                              prefs.pinned.includes(r.id)
+                                ? 'text-primary'
+                                : 'text-muted-foreground'
+                            }
+                            onClick={() => togglePinned(r.id)}
+                            aria-label={`${prefs.pinned.includes(r.id) ? 'Unpin' : 'Pin'} ${r.name}`}
+                            title={
+                              prefs.pinned.includes(r.id)
+                                ? 'Unpin runner'
+                                : 'Pin runner'
+                            }
+                          >
+                            <Pin className="size-3.5" />
+                          </button>
+                          {r.name}
+                        </div>
                         {r.status.broken && (
                           <div className="text-destructive mt-1 flex items-center gap-2 text-xs">
                             <CircleAlert className="size-3.5" />{' '}
-                            {r.status.broken}
+                            {localizeError(r.status.broken)}
                             {!r.pendingRemoval && (
                               <Button
                                 size="sm"
@@ -624,53 +1149,88 @@ export function RunnersPage({
                             </Button>
                           </div>
                         )}
-                        {r.status.lastError && !r.status.broken && (
+                        {r.status.lastError && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <div className="text-destructive mt-1 max-w-80 truncate text-xs">
-                                {r.status.lastError}
+                                {localizeError(r.status.lastError)}
                               </div>
                             </TooltipTrigger>
                             <TooltipContent className="max-w-md whitespace-pre-wrap">
-                              {r.status.lastError}
+                              {localizeError(r.status.lastError)}
                             </TooltipContent>
                           </Tooltip>
                         )}
+                        {r.status.creationFailed && !r.status.op && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-1 h-6 px-2 text-xs"
+                            onClick={() => repair(r)}
+                          >
+                            Retry failed creation
+                          </Button>
+                        )}
                       </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary">
-                          {r.mode === 'child' ? 'App' : 'Service'}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <LocalBadge r={r} />
-                      </TableCell>
-                      <TableCell>
-                        <GithubBadge r={r} />
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex max-w-64 flex-wrap gap-1">
-                          {r.labels.map((l) => (
-                            <span
-                              key={l}
-                              className="bg-secondary rounded px-1.5 py-0.5 font-mono text-[11px]"
-                            >
-                              {l}
-                            </span>
-                          ))}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground font-mono text-xs">
-                        {r.version ?? '—'}
-                      </TableCell>
+                      {hasColumn('mode') && (
+                        <TableCell>
+                          <Badge variant="secondary">
+                            {r.mode === 'child' ? 'App' : 'Service'}
+                          </Badge>
+                        </TableCell>
+                      )}
+                      {hasColumn('local') && (
+                        <TableCell>
+                          <LocalBadge r={r} />
+                        </TableCell>
+                      )}
+                      {hasColumn('github') && (
+                        <TableCell>
+                          <GithubBadge r={r} now={now} />
+                        </TableCell>
+                      )}
+                      {hasColumn('labels') && (
+                        <TableCell>
+                          <div className="flex max-w-64 flex-wrap gap-1">
+                            {r.labels.map((l) => (
+                              <span
+                                key={l}
+                                className="bg-secondary rounded px-1.5 py-0.5 font-mono text-[11px]"
+                              >
+                                {l}
+                              </span>
+                            ))}
+                          </div>
+                        </TableCell>
+                      )}
+                      {hasColumn('version') && (
+                        <TableCell className="text-muted-foreground font-mono text-xs">
+                          {r.version ?? '—'}
+                        </TableCell>
+                      )}
                       <TableCell>
                         <RowMenu
                           r={r}
                           onAction={(a) => bulk([r], a)}
+                          onStopAfterJob={() => void stopAfterCurrentJob(r)}
                           onLogs={() => setLogsFor(r)}
                           onLabels={() => setLabelsFor([r])}
                           onMode={() => setModeFor(r)}
                           onOptions={() => setOptionsFor(r)}
+                          onClone={() =>
+                            onCreate({
+                              connectionId: r.connectionId,
+                              target: r.target,
+                              count: 1,
+                              prefix: r.name.replace(/-\d+$/, '').slice(0, 56),
+                              labels: [...r.labels],
+                              runnerGroup: r.runnerGroup,
+                              mode: r.mode,
+                              autostart: r.autostart,
+                              cleanup: { ...r.cleanup },
+                              serviceAccount: r.serviceAccount,
+                            })
+                          }
                           onRepair={() => repair(r)}
                           onForget={() => forget(r)}
                           onDelete={() => remove([r])}
@@ -721,14 +1281,20 @@ export function RunnersPage({
                       {f.labels.join(', ')}
                     </TableCell>
                     <TableCell>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        onClick={() => removeForeign(f)}
-                        aria-label={`Delete ${f.name}`}
-                      >
-                        <Trash2 />
-                      </Button>
+                      {f.readOnly ? (
+                        <span className="text-muted-foreground text-xs">
+                          Read-only
+                        </span>
+                      ) : (
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => removeForeign(f)}
+                          aria-label={`Delete ${f.name}`}
+                        >
+                          <Trash2 />
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -739,9 +1305,164 @@ export function RunnersPage({
       )}
 
       <LogsDialog runner={logsFor} onClose={() => setLogsFor(null)} />
+      <Dialog
+        open={details !== null}
+        onOpenChange={(open) => !open && setDetailsId(null)}
+      >
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{details?.name}</DialogTitle>
+            <DialogDescription>Runner details and actions</DialogDescription>
+          </DialogHeader>
+          {details && (
+            <div className="space-y-3 text-sm">
+              {(
+                [
+                  ['Name', details.name],
+                  ['Target', targetKey(details.target)],
+                  ['Path', details.dir],
+                  [
+                    'GitHub ID',
+                    details.githubId?.toString() ?? 'Not registered',
+                  ],
+                  ['Labels', details.labels.join(', ') || 'None'],
+                  [
+                    'Status',
+                    `${details.status.local} · GitHub ${details.status.github}${details.status.busy ? ' · busy' : ''}`,
+                  ],
+                  ...(details.status.broken || details.status.lastError
+                    ? ([
+                        [
+                          'Message',
+                          details.status.broken ?? details.status.lastError!,
+                        ],
+                      ] as const)
+                    : []),
+                ] as const
+              ).map(([label, value]) => (
+                <div
+                  key={label}
+                  className="grid grid-cols-[6rem_1fr_auto] items-start gap-2"
+                >
+                  <span className="text-muted-foreground">{label}</span>
+                  <span className="break-all font-mono text-xs">{value}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => void copy(label, value)}
+                  >
+                    Copy
+                  </Button>
+                </div>
+              ))}
+              <div className="border-t pt-3">
+                <p className="font-medium">Cleanup</p>
+                <p className="text-muted-foreground">
+                  {details.cleanup.enabled
+                    ? `After each job${details.cleanup.actions ? ', actions' : ''}${details.cleanup.tool ? ', tools' : ''}`
+                    : 'Disabled'}
+                </p>
+              </div>
+              {(details.status.broken || details.status.lastError) && (
+                <div className="border-destructive/30 text-destructive rounded border p-2 text-xs">
+                  {localizeError(
+                    details.status.broken ?? details.status.lastError!,
+                  )}
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2 border-t pt-3">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={Boolean(details.status.op)}
+                  onClick={() => {
+                    setDetailsId(null);
+                    void bulk([details], 'start');
+                  }}
+                >
+                  <Play /> Start
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={Boolean(details.status.op)}
+                  onClick={() => {
+                    setDetailsId(null);
+                    void bulk([details], 'stop');
+                  }}
+                >
+                  <Square /> Stop
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={Boolean(details.status.op)}
+                  onClick={() => {
+                    setDetailsId(null);
+                    void bulk([details], 'restart');
+                  }}
+                >
+                  <RotateCw /> Restart
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setDetailsId(null);
+                    setLogsFor(details);
+                  }}
+                >
+                  <ScrollText /> Logs
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void call('runners:openFolder', details.id)}
+                >
+                  <FolderOpen /> Folder
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    void call('runners:openGithub', details.id, 'target')
+                  }
+                >
+                  Target on GitHub
+                </Button>
+                {details.githubId && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      void call('runners:openGithub', details.id, 'runner')
+                    }
+                  >
+                    Runner on GitHub
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setDetailsId(null);
+                    repair(details);
+                  }}
+                >
+                  <Wrench /> Repair
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
       <LabelsDialog runners={labelsFor} onClose={() => setLabelsFor(null)} />
       <ModeDialog runner={modeFor} onClose={() => setModeFor(null)} />
       <OptionsDialog runner={optionsFor} onClose={() => setOptionsFor(null)} />
+      <BulkOptionsDialog
+        runners={bulkOptionsFor}
+        onClose={() => setBulkOptionsFor(null)}
+      />
       <PasswordDialog
         runner={repairFor}
         onClose={() => setRepairFor(null)}
@@ -757,20 +1478,24 @@ export function RunnersPage({
 function RowMenu({
   r,
   onAction,
+  onStopAfterJob,
   onLogs,
   onLabels,
   onMode,
   onOptions,
+  onClone,
   onRepair,
   onForget,
   onDelete,
 }: {
   r: RunnerView;
   onAction: (a: BulkAction) => void;
+  onStopAfterJob: () => void;
   onLogs: () => void;
   onLabels: () => void;
   onMode: () => void;
   onOptions: () => void;
+  onClone: () => void;
   onRepair: () => void;
   onForget: () => void;
   onDelete: () => void;
@@ -798,6 +1523,20 @@ function RowMenu({
         >
           <Square /> Stop
         </DropdownMenuItem>
+        {r.mode === 'child' && (Boolean(s.jobName) || s.stopAfterJob) && (
+          <DropdownMenuItem
+            disabled={busyOp || s.orphan}
+            onClick={onStopAfterJob}
+          >
+            <Square />{' '}
+            {s.stopAfterJob
+              ? tr('Cancel stop after job', 'ยกเลิกการหยุดหลัง job')
+              : tr(
+                  'Stop after current job (best effort)',
+                  'หยุดหลัง job นี้ (ตามที่ทำได้)',
+                )}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem
           disabled={busyOp || Boolean(s.broken)}
           onClick={() => onAction('restart')}
@@ -805,6 +1544,9 @@ function RowMenu({
           <RotateCw /> Restart
         </DropdownMenuItem>
         <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={onClone}>
+          <Plus /> Create like this
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={onLogs}>
           <ScrollText /> Logs
         </DropdownMenuItem>
